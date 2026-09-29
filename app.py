@@ -2,6 +2,8 @@ import streamlit as st
 import json
 from config import load_config, save_config
 from agent import PolicyAgent
+from batch import batch_extract, split_policy_texts, to_comparison_rows
+from exporters import comparison_to_csv, match_result_to_markdown
 
 # 页面配置
 st.set_page_config(
@@ -22,6 +24,12 @@ if "user_answers" not in st.session_state:
 
 if "match_result" not in st.session_state:
     st.session_state.match_result = None
+
+if "policy_input_text" not in st.session_state:
+    st.session_state.policy_input_text = ""
+
+if "batch_results" not in st.session_state:
+    st.session_state.batch_results = None
 
 # 侧边栏：API 配置
 with st.sidebar:
@@ -55,23 +63,37 @@ agent = PolicyAgent(
     model_name=st.session_state.config["model_name"]
 )
 
-# 布局：左侧输入政策，右侧展示匹配与问答
-col1, col2 = st.columns([1, 1])
-
-with col1:
-    st.header("📝 步骤 1：输入政策文本")
-    policy_input = st.text_area(
-        "请粘贴政策原文（支持政府补贴、人才引进、税收减免等政策）：",
-        height=400,
-        placeholder="例如：\n关于开展2026年度高新技术企业认定工作的通知...\n申报条件：\n1. 企业申请认定时须注册成立一年以上...\n2. 企业上年度研发费用占营业收入比例不低于5%..."
+with st.expander("📚 批量政策解析（多份政策对比）", expanded=False):
+    st.caption("每份政策之间用一行 --- 分隔，可一次解析多份政策并导出对比表。")
+    batch_input = st.text_area(
+        "批量政策文本：",
+        height=200,
+        key="batch_input_text",
+        placeholder="政策一全文...\n---\n政策二全文...",
     )
+    if st.button("🚀 开始批量解析", key="batch_run"):
+        texts = split_policy_texts(batch_input)
+        if not texts:
+            st.warning("请至少输入一份政策文本。")
+        else:
+            with st.spinner(f"正在解析 {len(texts)} 份政策..."):
+                st.session_state.batch_results = batch_extract(agent, texts)
 
-    # 预设示例按钮
-    st.markdown("**💡 快速体验示例政策：**")
-    example_col1, example_col2 = st.columns(2)
-    with example_col1:
-        if st.button("📋 示例：高新技术企业认定"):
-            policy_input = """关于开展2026年度高新技术企业认定工作的通知
+    if st.session_state.batch_results:
+        rows = to_comparison_rows(st.session_state.batch_results)
+        if rows:
+            st.dataframe(rows, use_container_width=True)
+            st.download_button(
+                "⬇️ 导出政策对比表 (CSV)",
+                data=comparison_to_csv(rows),
+                file_name="政策对比表.csv",
+                mime="text/csv",
+            )
+        for entry in st.session_state.batch_results:
+            if not entry["ok"]:
+                st.error(f"第 {entry['index']} 份政策解析失败：{entry['error']}")
+
+EXAMPLE_HITECH = """关于开展2026年度高新技术企业认定工作的通知
 各有关单位：
 根据《高新技术企业认定管理办法》规定，现将2026年度认定申报条件通知如下：
 一、申报条件：
@@ -88,7 +110,53 @@ with col1:
 三、申报截止时间：
 本批次申报截止时间为2026年9月30日。
 """
-            st.rerun()
+
+EXAMPLE_TALENT = """关于2026年度高层次人才引进补贴申报的通知
+一、申报条件：
+1. 申报人须与本市用人单位签订3年以上劳动（聘用）合同。
+2. 申报人须具有全日制硕士及以上学历，或具有高级专业技术职称。
+3. 申报人年龄一般不超过45周岁。
+4. 申报人所在单位须在本市依法登记注册并正常纳税。
+二、扶持力度：
+对符合条件的引进人才，给予一次性安家补贴，硕士10万元、博士30万元。
+三、申报截止时间：
+本年度申报截止时间为2026年11月15日。
+"""
+
+
+def load_example(text: str) -> None:
+    """Button callback: runs before rerun, so widget state can be set."""
+    st.session_state.policy_input_text = text
+
+
+# 布局：左侧输入政策，右侧展示匹配与问答
+col1, col2 = st.columns([1, 1])
+
+with col1:
+    st.header("📝 步骤 1：输入政策文本")
+    policy_input = st.text_area(
+        "请粘贴政策原文（支持政府补贴、人才引进、税收减免等政策）：",
+        height=400,
+        key="policy_input_text",
+        placeholder="例如：\n关于开展2026年度高新技术企业认定工作的通知...\n申报条件：\n1. 企业申请认定时须注册成立一年以上...\n2. 企业上年度研发费用占营业收入比例不低于5%..."
+    )
+
+    # 预设示例按钮
+    st.markdown("**💡 快速体验示例政策：**")
+    example_col1, example_col2 = st.columns(2)
+    with example_col1:
+        st.button(
+            "📋 示例：高新技术企业认定",
+            on_click=load_example,
+            args=(EXAMPLE_HITECH,),
+        )
+
+    with example_col2:
+        st.button(
+            "📋 示例：人才引进补贴",
+            on_click=load_example,
+            args=(EXAMPLE_TALENT,),
+        )
 
     with col2:
         st.header("⚡ 步骤 2：条件确认与匹配评估")
@@ -226,3 +294,15 @@ if st.session_state.match_result:
             st.markdown(f"- [ ] {mat}")
     else:
         st.markdown("*政策中未明确提及具体材料，建议联系主管部门咨询。*")
+
+    # 导出报告
+    st.markdown("---")
+    policy_name = st.session_state.policy_data.get("policy_name", "政策")
+    report_md = match_result_to_markdown(st.session_state.policy_data, res)
+    st.download_button(
+        "⬇️ 下载 Markdown 报告",
+        data=report_md,
+        file_name=f"匹配评估报告_{policy_name}.md",
+        mime="text/markdown",
+        use_container_width=True,
+    )
